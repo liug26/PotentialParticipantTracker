@@ -1,20 +1,12 @@
-// 
+/** PROCESS EMAILS IMPLEMENTATION-------------------------------------------------------------------- */
 function processAllEmails()
 {
-  logScriptStart();
-  log('ProcessAllEmails triggered by user, authenticating user...');
-
-	// authenticate user and confirm before running script
-  if (!userAuthentication())
-  {
-    warning('User authentication failed!')
-    logScriptEnd();
+  try{
+  if (!startUpCheck('ProcessEmails'))
     return;
-  }
-  log('User authentication passed')
-
-  log('Fetching spreadsheet data: Master List, Initial Outreach, DQ\'d')
-  loadEmailLists();
+  
+  log('Fetching spreadsheet data: Master List, Initial Outreach, DQ\'d');
+  loadSpreadsheet();
   
   log('Fetching emails labeled \'Automated Processing\'')
   let allEmails = gatherEmails();
@@ -26,25 +18,25 @@ function processAllEmails()
     return;
   }
 
-  // check time
-  if (!inTime())
-  {
-    warning(`Max runtime limit: ${MAX_RUNTIME}s exceeds before backing up, exiting script`);
-    logScriptEnd();
-    SpreadsheetApp.getActive().toast(`Max runtime limit: ${MAX_RUNTIME}s exceeds before backing up. No changes were made, and a Job ID wasn\'t generated`, '⚠️ Warning');
-    return;
-  }
-
   // before here no modifcations were made
-  // jobID
   let jobID = generateJobID();
   log(`Created a Job ID: ${jobID}, creating corresponding Gmail label`)
   GmailApp.createLabel(`${jobID}`);
 
-  // backup
+  // backup old spreadsheet
   log('Backing up unmodified spreadsheet')
-  backupSpreadsheet(jobID)
+  backupSpreadsheet(jobID);
 
+  // check time in case backup takes a long time
+  if (!inTime())
+  {
+    warning(`Max runtime limit: ${MAX_RUNTIME}s exceeds after backing up spreadsheet, no emails were processed, exiting script`);
+    logScriptEnd();
+    SpreadsheetApp.getUi().alert(`Max runtime limit: ${MAX_RUNTIME}s exceeds after backing up spreadsheet and before any emails were processed. Re-run this function to finish up the rest of the emails. \nJob ID was ${jobID}`);
+    return;
+  }
+
+  // process emails
   let allEmailsLength = allEmails.length;
   for (let i = 0; i < allEmailsLength; i++)
   {
@@ -57,13 +49,18 @@ function processAllEmails()
     {
       warning(`Max runtime limit: ${MAX_RUNTIME}s exceeds after processing email ${i + 1} out of ${allEmailsLength}, exiting script`);
       logScriptEnd();
-      SpreadsheetApp.getActive().toast(`Max runtime limit: ${MAX_RUNTIME}s exceeds while processing emails. ${i + 1} out of ${allEmailsLength} emails were processed. Re-run this function to finish up the rest of the emails. Changes were made during execution, and Job ID was ${jobID}`, '😮 Info');
+      SpreadsheetApp.getUi().alert(`Max runtime limit: ${MAX_RUNTIME}s exceeds while processing emails. \n${i + 1} out of ${allEmailsLength} emails were processed. Re-run this function to finish up the rest of the emails. \nJob ID was ${jobID}`);
       return;
     }
   }
 
-	SpreadsheetApp.getActive().toast(`All ${allEmailsLength} emails were processed! Changes were made during execution, and Job ID was ${jobID}`, '🙂 Success!');
+  let currentLastResponseIndex = PropertiesService.getScriptProperties().getProperty('lastResponseIndex');
+  log(`Creating script property with key: ${jobID} and value: ${currentLastResponseIndex} (also the current unchanged lastResponseIndex)`);
+  PropertiesService.getScriptProperties().setProperty(jobID, currentLastResponseIndex);
+
+	SpreadsheetApp.getActive().toast(`All ${allEmailsLength} emails were processed! Job ID was ${jobID}`, '🙂 Success!');
   logScriptEnd();
+  } catch (e) { unkError(e); }
 }
 
 // Create a multidimensional array of messages that need processing. Subarray items include Full Transcript at index 0, Message Subject at index 1, and Message Sender at index 2.
@@ -71,10 +68,7 @@ function gatherEmails()
 {
 	let label = GmailApp.getUserLabelByName('Automated Processing');
   if (label == null)
-  {
-    // todo: tell no label
-    return [];
-  }
+    return [];  // this case should be prevented by running startUpCheck()
 	let threads = label.getThreads();
 	let emails = [];
 	for (let i = 0; i < threads.length; i++)
@@ -96,8 +90,8 @@ function processEmail(email, jobID)
 	let emailAddress = sender.substring(sender.indexOf('<') + 1, sender.indexOf('>'));
 	
   // Check for duplicate email address on Master List
-  let inMaster = isInMaster(emailAddress);
-  let inDQ = isInDQ(emailAddress)
+  let inMaster = isInMasterEmail(emailAddress);
+  let inDQ = isInDQEmail(emailAddress)
   let emailThread = GmailApp.search(`label: automated - processing from: (${emailAddress})`)[0];
   if (inMaster || inDQ)
   {
@@ -137,7 +131,7 @@ function processEmail(email, jobID)
 		emailThread.removeLabel(GmailApp.getUserLabelByName('Automated Processing'));
 		emailThread.addLabel(GmailApp.getUserLabelByName('Processed'));
 		emailThread.addLabel(GmailApp.getUserLabelByName(`${jobID}`));
-    addToMaster(emailAddress);
+    addToMaster(emailAddress, phoneNumber);
     log('Creating draft reply');
 		replyMessage = emailThread.createDraftReply('', {
 			htmlBody:
